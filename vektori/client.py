@@ -147,6 +147,7 @@ class Vektori:
         agent_id: str | None = None,
         metadata: dict[str, Any] | None = None,
         session_time: datetime | None = None,
+        skip_extraction: bool = False,
     ) -> dict[str, Any]:
         """
         Store a conversation session into the memory graph.
@@ -170,7 +171,8 @@ class Vektori:
         await self._ensure_initialized()
 
         result = await self._pipeline.ingest(
-            messages, session_id, user_id, agent_id, metadata, session_time=session_time
+            messages, session_id, user_id, agent_id, metadata, session_time=session_time,
+            skip_extraction=skip_extraction,
         )
 
         n = self.config.synthesis_interval
@@ -218,16 +220,16 @@ class Vektori:
         Maps source:source_id -> deterministic session_id so re-ingestion upserts, not duplicates.
         """
         session_id = f"{source}:{source_id}"
-        
+
         doc_metadata = metadata or {}
         doc_metadata.update({
             "source": source,
             "source_id": source_id,
             "type": "document",
         })
-        
+
         messages = [{"role": "user", "content": content}]
-        
+
         return await self.add(
             messages=messages,
             session_id=session_id,

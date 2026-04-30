@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib
 
-from vektori.models.base import EmbeddingProvider, LLMProvider
+from vektori.models.base import ChatModelProvider, EmbeddingProvider, LLMProvider
 
 # Format: "provider_key": "module.path.ClassName"
 EMBEDDING_REGISTRY: dict[str, str] = {
@@ -36,6 +36,12 @@ LLM_REGISTRY: dict[str, str] = {
     "vllm": "vektori.models.openai_compatible.VLLMLLM",
     "lmstudio": "vektori.models.openai_compatible.LMStudioLLM",
     "openai-compatible": "vektori.models.openai_compatible.OpenAICompatibleLLM",
+}
+
+
+CHAT_REGISTRY: dict[str, str] = {
+    "openai": "vektori.models.openai.OpenAIChatModel",
+    "litellm": "vektori.models.litellm_provider.LiteLLMChatModel",
 }
 
 
@@ -74,6 +80,17 @@ def create_llm(model_string: str, **kwargs) -> LLMProvider:
             f"Unknown LLM provider: '{provider}'. Available: {list(LLM_REGISTRY.keys())}"
         )
     cls = _import_class(LLM_REGISTRY[provider])
+    return cls(model=model_name or None, **kwargs)
+
+
+def create_chat_model(model_string: str, **kwargs) -> ChatModelProvider:
+    """Resolve 'provider:model_name' into a ChatModelProvider instance."""
+    provider, _, model_name = model_string.partition(":")
+    if provider not in CHAT_REGISTRY:
+        raise ValueError(
+            f"Unknown chat provider: '{provider}'. Available: {list(CHAT_REGISTRY.keys())}"
+        )
+    cls = _import_class(CHAT_REGISTRY[provider])
     return cls(model=model_name or None, **kwargs)
 
 

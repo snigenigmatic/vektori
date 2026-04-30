@@ -174,6 +174,14 @@ More examples in [`/examples`](examples/):
 - [`quickstart.py`](examples/quickstart.py) — fully local, zero API keys (Ollama)
 - [`openai_agent.py`](examples/openai_agent.py) — OpenAI native harness loop
 - [`vektori_agent_demo.py`](examples/vektori_agent_demo.py) — minimal `VektoriAgent` demo
+- [`gemini_agent_integration_demo.py`](examples/gemini_agent_integration_demo.py) — Gemini extraction + agent chat showcase
+- [`gemini_agent_ui.py`](examples/gemini_agent_ui.py) — single-file local web UI that shows chat + live memory trace
+- [`integrating_hermes_openclaw.py`](examples/integrating_hermes_openclaw.py) — Hermes/OpenClaw adapter wiring example
+- [`real_world_support_case.py`](examples/real_world_support_case.py) — realistic support handoff / follow-up smoke test
+
+For a live end-to-end harness check, run [`scripts/test_agent_e2e.py`](scripts/test_agent_e2e.py). It exercises retrieval, profile learning, tool calling, and window persistence against real providers.
+
+Hermes/OpenClaw support in this repo is currently an integration starter path (adapter/plugin wiring), not a widely benchmarked default harness.
 
 ---
 

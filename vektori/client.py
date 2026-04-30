@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import Any
@@ -39,6 +40,7 @@ class Vektori:
         context_window: int = 3,
         temporal_decay_rate: float = 0.001,
         async_extraction: bool = True,
+        synthesis_interval: int | None = 5,
         qdrant_api_key: str | None = None,
         milvus_token: str | None = None,
         agent_type: str = "general",
@@ -61,6 +63,7 @@ class Vektori:
                 context_window=context_window,
                 temporal_decay_rate=temporal_decay_rate,
                 async_extraction=async_extraction,
+                synthesis_interval=synthesis_interval,
                 qdrant_api_key=qdrant_api_key,
                 milvus_token=milvus_token,
                 extraction_config=ec,
@@ -74,6 +77,7 @@ class Vektori:
         self._search = None
         self._pipeline = None
         self._expander = None
+        self._bg_tasks: set[asyncio.Task[Any]] = set()
 
     async def _ensure_initialized(self) -> None:
         if not self._initialized:
@@ -101,11 +105,20 @@ class Vektori:
             max_output_tokens=self.config.max_extraction_output_tokens,
             extraction_config=self.config.extraction_config,
         )
+        # Import syntheizer lazily or at module level. Let's do it inside the file at the top or here.
+        from vektori.ingestion.synthesis import Synthesizer
+
+        self._synthesizer = Synthesizer(
+            db=self.db,
+            embedder=self.embedder,
+            llm=self.llm,
+        )
         self._search = SearchPipeline(
             db=self.db,
             embedder=self.embedder,
             temporal_decay_rate=self.config.temporal_decay_rate,
             min_score=self.config.min_retrieval_score,
+            use_ppr=self.config.use_ppr,
         )
         self._pipeline = IngestionPipeline(
             db=self.db,
@@ -156,10 +169,107 @@ class Vektori:
             {"status": "ok", "sentences_stored": N, "extraction": "queued"|"done"|"skipped"}
         """
         await self._ensure_initialized()
-        return await self._pipeline.ingest(
+
+        result = await self._pipeline.ingest(
             messages, session_id, user_id, agent_id, metadata, session_time=session_time,
             skip_extraction=skip_extraction,
         )
+
+        n = self.config.synthesis_interval
+        if n is not None and n > 0:
+            if getattr(self.config, "async_extraction", True):
+
+                async def _bg_synthesize_after_extraction() -> None:
+                    try:
+                        worker = self._pipeline.worker if self._pipeline else None
+                        if worker is not None:
+                            await worker.wait_for_idle(user_id, agent_id)
+                        await self._auto_synthesize_if_due(user_id, agent_id, n)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        logger.error("Auto-synthesis failed: %s", e)
+
+                task = asyncio.create_task(_bg_synthesize_after_extraction())
+                self._bg_tasks.add(task)
+                task.add_done_callback(self._bg_tasks.discard)
+            else:
+                await self._auto_synthesize_if_due(user_id, agent_id, n)
+
+        return result
+
+    async def _auto_synthesize_if_due(
+        self, user_id: str, agent_id: str | None, interval: int
+    ) -> None:
+        count = await self.db.count_sessions(user_id=user_id, agent_id=agent_id)
+        if count > 0 and count % interval == 0:
+            await self.synthesize(user_id=user_id, agent_id=agent_id)
+
+    async def add_document(
+        self,
+        content: str,
+        source: str,
+        source_id: str,
+        user_id: str,
+        agent_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        document_time: datetime | None = None,
+    ) -> dict[str, Any]:
+        """
+        Store an external document (e.g., Notion page, GitHub issue) into memory.
+        Maps source:source_id -> deterministic session_id so re-ingestion upserts, not duplicates.
+        """
+        session_id = f"{source}:{source_id}"
+        
+        doc_metadata = metadata or {}
+        doc_metadata.update({
+            "source": source,
+            "source_id": source_id,
+            "type": "document",
+        })
+        
+        messages = [{"role": "user", "content": content}]
+        
+        return await self.add(
+            messages=messages,
+            session_id=session_id,
+            user_id=user_id,
+            agent_id=agent_id,
+            metadata=doc_metadata,
+            session_time=document_time,
+        )
+
+    async def connect(
+        self,
+        connector: Any,
+        user_id: str,
+        since: datetime | None = None,
+    ) -> int:
+        """
+        Ingest data from a platform connector into memory.
+
+        Args:
+            connector: An instance of `vektori.connectors.base.Connector`.
+            user_id: Whose data is being ingested.
+            since: Only ingest data modified since this time.
+
+        Returns:
+            The number of documents/records successfully ingested.
+        """
+        return await connector.ingest(user_id=user_id, vektori=self, since=since)
+    async def synthesize(self, user_id: str, agent_id: str | None = None) -> int:
+        """
+        Run a cross-session synthesis pass for the user.
+        Examines active facts across sessions to form aggregate/macro facts
+        (e.g., "User consistently prefers X", "User has done Y across multiple sessions").
+
+        Returns the number of new aggregate facts inserted.
+        """
+        await self._ensure_initialized()
+        if not hasattr(self, "_synthesizer"):
+            logger.warning("Synthesizer not initialized.")
+            return 0
+        return await self._synthesizer.synthesize(user_id, agent_id)
 
     async def search(
         self,
@@ -263,6 +373,11 @@ class Vektori:
 
     async def close(self) -> None:
         """Close database connections and gracefully shut down background workers."""
+        if self._bg_tasks:
+            for task in list(self._bg_tasks):
+                task.cancel()
+            await asyncio.gather(*self._bg_tasks, return_exceptions=True)
+            self._bg_tasks.clear()
         if self._pipeline and self._pipeline.worker:
             await self._pipeline.worker.shutdown()
         if self.db:

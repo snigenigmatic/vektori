@@ -196,6 +196,71 @@ class StorageBackend(ABC):
         for fact_id, sentence_id in pairs:
             await self.insert_fact_source(fact_id, sentence_id)
 
+    # ── Syntheses ──
+
+    async def insert_synthesis(
+        self,
+        text: str,
+        embedding: list[float],
+        user_id: str,
+        agent_id: str | None = None,
+        session_id: str | None = None,
+    ) -> str:
+        raise NotImplementedError()
+
+    async def insert_synthesis_fact(self, synthesis_id: str, fact_id: str) -> None:
+        raise NotImplementedError()
+
+    async def get_syntheses_for_facts(self, fact_ids: list[str]) -> list[dict[str, Any]]:
+        return []
+
+    async def search_syntheses(
+        self,
+        embedding: list[float],
+        user_id: str,
+        agent_id: str | None = None,
+        limit: int = 10,
+        threshold: float = 0.0,
+    ) -> list[dict[str, Any]]:
+        return []
+
+    @abstractmethod
+    async def get_source_sentences(self, fact_ids: list[str]) -> list[str]:
+        """Return sentence IDs that are sources for the given facts (via fact_sources)."""
+        ...
+
+    @abstractmethod
+    async def get_sentences_by_ids(self, sentence_ids: list[str]) -> list[dict[str, Any]]:
+        """Fetch full sentence rows for the given IDs."""
+        ...
+
+    # ── Fact similarity edges (PPR graph) ──
+
+    async def insert_fact_edge(
+        self,
+        source_id: str,
+        target_id: str,
+        user_id: str,
+        weight: float = 1.0,
+    ) -> None:
+        """Insert a similarity edge between two facts. ON CONFLICT DO NOTHING."""
+
+    async def get_fact_edges_for_user(
+        self,
+        user_id: str,
+        agent_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return all fact similarity edges for a user as [{source_id, target_id, weight}]."""
+        return []
+
+    async def get_episode_fact_map(
+        self,
+        user_id: str,
+        agent_id: str | None = None,
+    ) -> dict[str, list[str]]:
+        """Return {episode_id: [fact_id, ...]} for all active episodes of a user."""
+        return {}
+
     # ── Episodes ──
 
     @abstractmethod
@@ -243,16 +308,6 @@ class StorageBackend(ABC):
         didn't land in the top-k but whose episode text is semantically close to
         the query.
         """
-        ...
-
-    @abstractmethod
-    async def get_source_sentences(self, fact_ids: list[str]) -> list[str]:
-        """Return sentence IDs that are sources for the given facts (via fact_sources)."""
-        ...
-
-    @abstractmethod
-    async def get_sentences_by_ids(self, sentence_ids: list[str]) -> list[dict[str, Any]]:
-        """Fetch full sentence rows for the given IDs."""
         ...
 
     # ── Sessions ──

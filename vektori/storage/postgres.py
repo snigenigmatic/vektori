@@ -112,6 +112,27 @@ class PostgresBackend(StorageBackend):
             )
         if "mentions" not in existing:
             await conn.execute("ALTER TABLE facts ADD COLUMN mentions INTEGER DEFAULT 1")
+        await conn.execute("DROP INDEX IF EXISTS idx_syntheses_user_text")
+        await conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_syntheses_user_agent_text
+            ON syntheses (user_id, COALESCE(agent_id, ''), text)
+            """
+        )
+        # fact_edges table for PPR graph
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS fact_edges (
+                source_id UUID NOT NULL REFERENCES facts(id) ON DELETE CASCADE,
+                target_id UUID NOT NULL REFERENCES facts(id) ON DELETE CASCADE,
+                user_id TEXT NOT NULL,
+                weight FLOAT DEFAULT 1.0,
+                created_at TIMESTAMPTZ DEFAULT now(),
+                PRIMARY KEY (source_id, target_id)
+            )
+        """)
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_fact_edges_user ON fact_edges (user_id)"
+        )
 
     async def close(self) -> None:
         if self._pool:
@@ -515,7 +536,161 @@ class PostgresBackend(StorageBackend):
                 [(uuid.UUID(f), uuid.UUID(s)) for f, s in pairs],
             )
 
-    # ── Episodes ──────────────────────────────────────────────────────────────
+    # ── Syntheses ──
+
+    async def insert_synthesis(
+        self,
+        text: str,
+        embedding: list[float],
+        user_id: str,
+        agent_id: str | None = None,
+        session_id: str | None = None,
+    ) -> str:
+        scope = agent_id or ""
+        synthesis_id = uuid.uuid5(uuid.NAMESPACE_OID, f"{user_id}::{scope}::{text}")
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO syntheses (id, text, embedding, user_id, agent_id, session_id)
+                VALUES ($1, $2, $3::vector, $4, $5, $6)
+                ON CONFLICT DO NOTHING
+                """,
+                synthesis_id,
+                text,
+                _vec(embedding),
+                user_id,
+                agent_id,
+                session_id,
+            )
+        return str(synthesis_id)
+
+    async def insert_synthesis_fact(self, synthesis_id: str, fact_id: str) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO synthesis_facts (synthesis_id, fact_id)
+                VALUES ($1, $2)
+                ON CONFLICT DO NOTHING
+                """,
+                uuid.UUID(synthesis_id),
+                uuid.UUID(fact_id),
+            )
+
+    async def get_syntheses_for_facts(self, fact_ids: list[str]) -> list[dict[str, Any]]:
+        if not fact_ids:
+            return []
+        uuid_ids = [uuid.UUID(fid) for fid in fact_ids]
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT e.id, e.text, e.session_id, e.created_at
+                FROM syntheses e
+                JOIN synthesis_facts ef2 ON e.id = ef2.synthesis_id
+                WHERE ef2.fact_id = ANY($1::uuid[])
+                  AND e.is_active = true
+                """,
+                uuid_ids,
+            )
+        return [_row(r) for r in rows]
+
+    async def search_syntheses(
+        self,
+        embedding: list[float],
+        user_id: str,
+        agent_id: str | None = None,
+        limit: int = 5,
+        threshold: float = 0.0,
+    ) -> list[dict[str, Any]]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, text, session_id, created_at,
+                       embedding <=> $1::vector AS distance
+                FROM syntheses
+                WHERE user_id = $2
+                  AND ($3::text IS NULL OR agent_id = $3)
+                  AND is_active = true
+                  AND ($5::float <= 0 OR 1.0 - (embedding <=> $1::vector) >= $5)
+                ORDER BY embedding <=> $1::vector
+                LIMIT $4
+                """,
+                _vec(embedding),
+                user_id,
+                agent_id,
+                limit,
+                threshold,
+            )
+        return [_row(r) for r in rows]
+
+    async def get_source_sentences(self, fact_ids: list[str]) -> list[str]:
+        """Return sentence IDs that are the sources for the given facts."""
+        if not fact_ids:
+            return []
+        uuid_ids = [uuid.UUID(fid) for fid in fact_ids]
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT sentence_id
+                FROM fact_sources
+                WHERE fact_id = ANY($1::uuid[])
+                """,
+                uuid_ids,
+            )
+        return [str(row["sentence_id"]) for row in rows]
+
+    # ── Fact similarity edges (PPR graph) ──
+
+    async def insert_fact_edge(
+        self,
+        source_id: str,
+        target_id: str,
+        user_id: str,
+        weight: float = 1.0,
+    ) -> None:
+        a, b = (source_id, target_id) if source_id < target_id else (target_id, source_id)
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO fact_edges (source_id, target_id, user_id, weight)
+                   VALUES ($1::uuid, $2::uuid, $3, $4)
+                   ON CONFLICT DO NOTHING""",
+                a, b, user_id, weight,
+            )
+
+    async def get_fact_edges_for_user(
+        self,
+        user_id: str,
+        agent_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT source_id, target_id, weight FROM fact_edges WHERE user_id = $1",
+                user_id,
+            )
+        return [{"source_id": str(r["source_id"]), "target_id": str(r["target_id"]), "weight": r["weight"]} for r in rows]
+
+    async def get_episode_fact_map(
+        self,
+        user_id: str,
+        agent_id: str | None = None,
+    ) -> dict[str, list[str]]:
+        query = """
+            SELECT ef.episode_id::text, ef.fact_id::text
+            FROM episode_facts ef
+            JOIN facts f ON ef.fact_id = f.id
+            WHERE f.user_id = $1 AND f.is_active = true
+        """
+        params = [user_id]
+        if agent_id:
+            query += " AND f.agent_id = $2"
+            params.append(agent_id)
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+        result: dict[str, list[str]] = {}
+        for row in rows:
+            result.setdefault(row["episode_id"], []).append(row["fact_id"])
+        return result
+
+    # ── Syntheses ──
 
     async def insert_episode(
         self,
@@ -596,24 +771,6 @@ class PostgresBackend(StorageBackend):
                 limit,
             )
         return [_row(r) for r in rows]
-
-    async def get_source_sentences(self, fact_ids: list[str]) -> list[str]:
-        """Return sentence IDs that are the sources for the given facts."""
-        if not fact_ids:
-            return []
-        uuid_ids = [uuid.UUID(fid) for fid in fact_ids]
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT DISTINCT sentence_id
-                FROM fact_sources
-                WHERE fact_id = ANY($1::uuid[])
-                """,
-                uuid_ids,
-            )
-        return [str(row["sentence_id"]) for row in rows]
-
-    # ── Sessions ───────────────────────────────────────────────────────────────
 
     async def upsert_session(
         self,
@@ -805,6 +962,7 @@ class PostgresBackend(StorageBackend):
                         (SELECT COUNT(*) FROM sentences WHERE user_id = $1) +
                         (SELECT COUNT(*) FROM facts    WHERE user_id = $1) +
                         (SELECT COUNT(*) FROM episodes WHERE user_id = $1) +
+                        (SELECT COUNT(*) FROM syntheses WHERE user_id = $1) +
                         (SELECT COUNT(*) FROM sessions WHERE user_id = $1) AS total
                     """,
                     user_id,
@@ -813,6 +971,7 @@ class PostgresBackend(StorageBackend):
                 await conn.execute("DELETE FROM sentences WHERE user_id = $1", user_id)
                 await conn.execute("DELETE FROM facts    WHERE user_id = $1", user_id)
                 await conn.execute("DELETE FROM episodes WHERE user_id = $1", user_id)
+                await conn.execute("DELETE FROM syntheses WHERE user_id = $1", user_id)
                 await conn.execute("DELETE FROM sessions WHERE user_id = $1", user_id)
 
         logger.info("Deleted %d rows for user %s", total, user_id)

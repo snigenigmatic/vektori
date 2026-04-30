@@ -1,9 +1,9 @@
-"""Abstract base classes for embedding, extraction, and chat providers."""
+"""Abstract base classes for embedding and LLM providers."""
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 

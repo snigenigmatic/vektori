@@ -4,7 +4,8 @@ LoCoMo Benchmark Entry Point
 
 Runs Vektori on the LoCoMo-10 dataset using:
   - Cloudflare Workers AI: BGE-M3 embeddings (zero local GPU)
-    - Gemini 2.5 Flash-Lite: fact extraction + QA evaluation
+  - Gemini 2.5 Flash-Lite: fact/episode extraction by default
+  - Qwen3-8B via local vLLM: QA evaluation by default
 
 Required environment variables (set in .env or shell):
     CLOUDFLARE_API_TOKEN   — Workers AI token (Account > Workers AI > Read)
@@ -57,10 +58,11 @@ def _check_env() -> None:
 
 
 async def _main() -> None:
+    import argparse
     from datetime import datetime as _dt
+
     from benchmarks.locomo.locomo_runner import LoCoMoBenchmark, LoCoMoConfig
 
-    import argparse
     parser = argparse.ArgumentParser(description="Run Vektori on LoCoMo-10")
     parser.add_argument(
         "--max-questions", type=int, default=5,
@@ -79,12 +81,25 @@ async def _main() -> None:
         help="LLM for QA answer generation"
     )
     parser.add_argument(
+        "--qa-prompt-file", default=None,
+        help="Optional path to GEPA-optimized QA prompt text"
+    )
+    parser.add_argument(
         "--max-extraction-output-tokens", type=int, default=32768,
         help="Max output tokens for extraction LLM calls"
     )
     parser.add_argument(
+        "--no-ppr", action="store_true",
+        help="Disable PPR retrieval — revert to plain graph hop (ablation)"
+    )
+    parser.add_argument(
         "--no-cache", action="store_true",
         help="Disable session extract cache for this run"
+    )
+    parser.add_argument(
+        "--qa-thinking-level", default=None,
+        help="Thinking level for QA eval model: high/medium/low/minimal (gemini-3 only). "
+             "None = model default (minimal). Use 'high' to test synthesis hypothesis."
     )
     parser.add_argument(
         "--cache-namespace", default=None,
@@ -110,6 +125,7 @@ async def _main() -> None:
         embedding_model="cloudflare:@cf/baai/bge-m3",
         extraction_model=args.extraction_model,
         eval_model=args.eval_model,
+        qa_prompt_path=args.qa_prompt_file,
         max_extraction_output_tokens=args.max_extraction_output_tokens,
         retrieval_depth=args.depth,
         output_dir=output_dir,
@@ -118,6 +134,8 @@ async def _main() -> None:
         max_questions=max_q,
         use_cache=not args.no_cache,
         cache_namespace=args.cache_namespace,
+        use_ppr=not args.no_ppr,
+        qa_thinking_level=args.qa_thinking_level,
     )
 
     if max_q:

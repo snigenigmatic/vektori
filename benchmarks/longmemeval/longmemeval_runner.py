@@ -32,7 +32,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -51,7 +50,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _base_question_type(question_type: str) -> str:
+    """Strip LongMemEval abstention suffix while preserving the real task type."""
+    return question_type.removesuffix("_abs")
+
+
 # ── Config ────────────────────────────────────────────────────────────────────
+
 
 @dataclass
 class BenchmarkConfig:
@@ -68,7 +73,7 @@ class BenchmarkConfig:
     extraction_model: str = "gemini:gemini-2.5-flash-lite"
 
     # Retrieval
-    retrieval_depth: str = "l1"   # l0 | l1 | l2
+    retrieval_depth: str = "l1"  # l0 | l1 | l2
     top_k: int = 10
     context_window: int = 3
 
@@ -85,6 +90,7 @@ class BenchmarkConfig:
 
 
 # ── Runner ────────────────────────────────────────────────────────────────────
+
 
 class LongMemEvalBenchmark:
     """Main benchmark runner."""
@@ -128,7 +134,7 @@ class LongMemEvalBenchmark:
             extraction_model=self.config.extraction_model,
             default_top_k=self.config.top_k,
             context_window=self.config.context_window,
-            async_extraction=False,   # benchmark needs sync so we can interleave cache ops
+            async_extraction=False,  # benchmark needs sync so we can interleave cache ops
         )
         await self.vektori_client._ensure_initialized()
         self.storage = self.vektori_client.db
@@ -218,9 +224,10 @@ class LongMemEvalBenchmark:
                 if done % 10 == 0 or done == total:
                     logger.info(
                         "Progress: %d/%d questions answered (cache: %d sessions)",
-                        done, total, await self._session_cache.count(),
+                        done,
+                        total,
+                        await self._session_cache.count(),
                     )
-
 
             except Exception as e:
                 logger.error("Question %s failed: %s", qid, e, exc_info=True)
@@ -249,15 +256,17 @@ class LongMemEvalBenchmark:
             session_date = haystack_dates[i] if i < len(haystack_dates) else None
             session_time = _parse_date(session_date) if session_date else None
 
-            cached_facts = await self._session_cache.get(hsid)
-            if cached_facts is not None:
-                await self._replay_session(session, hsid, user_id, session_time, session_date, cached_facts)
+            cached_entry = await self._session_cache.get(hsid)
+            if cached_entry is not None:
+                await self._replay_session(
+                    session, hsid, user_id, session_time, session_date, cached_entry
+                )
             else:
-                new_facts = await self._full_ingest_session(
+                new_facts, new_episodes = await self._full_ingest_session(
                     session, hsid, user_id, session_time, session_date
                 )
                 if new_facts:  # don't cache failed/empty extractions — allow retry on next run
-                    await self._session_cache.put(hsid, new_facts)
+                    await self._session_cache.put(hsid, new_facts, episodes=new_episodes)
 
     async def _replay_session(
         self,
@@ -266,11 +275,10 @@ class LongMemEvalBenchmark:
         user_id: str,
         session_time: datetime | None,
         session_date: str | None,
-        cached_facts: list[dict[str, Any]],
+        cached_entry: dict[str, Any],
     ) -> None:
-        """Cache hit path: store sentences locally, replay pre-extracted facts,
-        then run episode extraction (cheap LLM call — only facts were cached,
-        not episodes, so we generate them fresh here)."""
+        """Cache hit path: store sentences locally, replay pre-extracted facts and episodes.
+        No LLM calls — episodes are replayed from cache via local re-embed."""
         pipeline = self.vektori_client._pipeline
         extractor = self.vektori_client._extractor
 
@@ -283,9 +291,12 @@ class LongMemEvalBenchmark:
             skip_extraction=True,
         )
 
+        cached_fact_list = cached_entry.get("facts") or []
+        cached_episode_list = cached_entry.get("episodes") or []
+
         inserted_facts: list[tuple[str, str]] = []
         await extractor.replay_facts(
-            cached_facts=cached_facts,
+            cached_facts=cached_fact_list,
             session_id=haystack_sid,
             user_id=user_id,
             session_time=session_time,
@@ -293,22 +304,38 @@ class LongMemEvalBenchmark:
         )
 
         if inserted_facts:
-            conversation = "\n".join(
-                f"{msg['role'].upper()}: {msg['content']}" for msg in session
-            )
-            try:
-                await extractor._extract_episodes(
-                    inserted_facts=inserted_facts,
-                    conversation=conversation,
-                    session_id=haystack_sid,
-                    user_id=user_id,
-                    agent_id=None,
-                    session_time=session_time,
+            if cached_episode_list:
+                try:
+                    await extractor.replay_episodes(
+                        cached_episodes=cached_episode_list,
+                        inserted_facts=inserted_facts,
+                        session_id=haystack_sid,
+                        user_id=user_id,
+                        agent_id=None,
+                        session_time=session_time,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Episode replay failed for cached session %s: %s", haystack_sid, e
+                    )
+            else:
+                # Fallback for old cache entries that pre-date episode caching
+                conversation = "\n".join(
+                    f"{msg['role'].upper()}: {msg['content']}" for msg in session
                 )
-            except Exception as e:
-                logger.warning(
-                    "Episode extraction failed for cached session %s: %s", haystack_sid, e
-                )
+                try:
+                    await extractor._extract_episodes(
+                        inserted_facts=inserted_facts,
+                        conversation=conversation,
+                        session_id=haystack_sid,
+                        user_id=user_id,
+                        agent_id=None,
+                        session_time=session_time,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Episode extraction failed for cached session %s: %s", haystack_sid, e
+                    )
 
     async def _full_ingest_session(
         self,
@@ -317,8 +344,8 @@ class LongMemEvalBenchmark:
         user_id: str,
         session_time: datetime | None,
         session_date: str | None,
-    ) -> list[dict[str, Any]]:
-        """Cache miss path: full LLM extraction.  Returns cacheable facts."""
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Cache miss path: full LLM extraction.  Returns (facts, episodes)."""
         pipeline = self.vektori_client._pipeline
         extractor = self.vektori_client._extractor
 
@@ -332,34 +359,37 @@ class LongMemEvalBenchmark:
             skip_extraction=True,
         )
 
-        # LLM fact extraction — capture results for the cache.
+        # LLM fact + episode extraction — capture results for the cache.
         captured_facts: list[dict[str, Any]] = []
+        captured_episodes: list[dict[str, Any]] = []
         await extractor.extract(
             messages=session,
             session_id=haystack_sid,
             user_id=user_id,
             session_time=session_time,
             _capture_out=captured_facts,
+            _capture_episodes_out=captured_episodes,
         )
 
-        return captured_facts
+        return captured_facts, captured_episodes
 
     # ── Retrieval + QA ────────────────────────────────────────────────────────
 
-    async def _answer_question(
-        self, instance: dict[str, Any], user_id: str
-    ) -> dict[str, Any]:
+    async def _answer_question(self, instance: dict[str, Any], user_id: str) -> dict[str, Any]:
         qid = instance["question_id"]
         question = instance["question"]
         question_type = instance["question_type"]
+        base_question_type = _base_question_type(question_type)
         question_date = instance.get("question_date") or ""
 
         retrieval_t0 = time.perf_counter()
+        use_expansion = base_question_type in ("multi-session", "temporal-reasoning")
         search_results = await self.vektori_client.search(
             query=question,
             user_id=user_id,
             depth=self.config.retrieval_depth,
             reference_date=_parse_date(question_date) if question_date else None,
+            expand=use_expansion,
         )
         retrieval_ms = (time.perf_counter() - retrieval_t0) * 1000
 
@@ -448,7 +478,7 @@ class LongMemEvalBenchmark:
 
         llm = create_llm(self.config.eval_model)
         prompt = self._build_qa_prompt(question, context, question_type, question_date)
-        max_tokens = 800 if question_type == "temporal-reasoning" else 500
+        max_tokens = 800 if _base_question_type(question_type) == "temporal-reasoning" else 500
         try:
             return (await llm.generate(prompt, max_tokens=max_tokens)).strip()
         except Exception as e:
@@ -459,6 +489,7 @@ class LongMemEvalBenchmark:
         self, question: str, context: str, question_type: str, question_date: str = ""
     ) -> str:
         date_line = f"TODAY'S DATE: {question_date}\n\n" if question_date else ""
+        base_question_type = _base_question_type(question_type)
 
         abs_hint = ""
         if question_type.endswith("_abs"):
@@ -467,7 +498,7 @@ class LongMemEvalBenchmark:
                 "recognise that the information was never mentioned"
             )
 
-        if question_type == "temporal-reasoning":
+        if base_question_type == "temporal-reasoning":
             return (
                 "You are an AI assistant answering questions based on provided context "
                 "from chat history.\n\n"
@@ -479,7 +510,8 @@ class LongMemEvalBenchmark:
                 "- First, list the relevant dated events from the context\n"
                 "- Then compute the answer (count days/weeks/months between dates)\n"
                 "- If the context does not contain enough information to answer, say "
-                "\"I don't have that information\"\n\n"
+                '"I don\'t have that information"'
+                f"{abs_hint}\n\n"
                 "REASONING:\n"
             )
 
@@ -494,7 +526,7 @@ class LongMemEvalBenchmark:
             "- Be concise and direct — a short phrase or sentence is preferred over a long explanation\n"
             "- For questions about time elapsed, use TODAY'S DATE above as your reference point\n"
             "- If the context does not contain enough information to answer, say "
-            "\"I don't have that information\" — do not guess or infer beyond what is stated"
+            '"I don\'t have that information" — do not guess or infer beyond what is stated'
             f"{abs_hint}\n\n"
             "ANSWER:"
         )
@@ -513,7 +545,10 @@ class LongMemEvalBenchmark:
         jsonl_path = self.output_dir / f"{run_name}_qa_results.jsonl"
         with open(jsonl_path, "w", encoding="utf-8") as f:
             for r in qa_results:
-                f.write(json.dumps({"question_id": r["question_id"], "hypothesis": r["hypothesis"]}) + "\n")
+                f.write(
+                    json.dumps({"question_id": r["question_id"], "hypothesis": r["hypothesis"]})
+                    + "\n"
+                )
         logger.info("QA pairs saved to %s", jsonl_path)
 
         self._metrics = self._compute_metrics(qa_results)
@@ -632,22 +667,20 @@ class LongMemEvalBenchmark:
             if lat:
                 print("\nLatency (ms):")
                 print(
-                    "  Ingestion      avg={0}  p95={1}".format(
+                    "  Ingestion      avg={}  p95={}".format(
                         lat.get("ingestion_avg"), lat.get("ingestion_p95")
                     )
                 )
                 print(
-                    "  Retrieval      avg={0}  p95={1}".format(
+                    "  Retrieval      avg={}  p95={}".format(
                         lat.get("retrieval_avg"), lat.get("retrieval_p95")
                     )
                 )
                 print(
-                    "  QA generation  avg={0}  p95={1}".format(
-                        lat.get("qa_avg"), lat.get("qa_p95")
-                    )
+                    "  QA generation  avg={}  p95={}".format(lat.get("qa_avg"), lat.get("qa_p95"))
                 )
                 print(
-                    "  Total/question avg={0}  p95={1}".format(
+                    "  Total/question avg={}  p95={}".format(
                         lat.get("total_question_avg"), lat.get("total_question_p95")
                     )
                 )
@@ -665,6 +698,7 @@ class LongMemEvalBenchmark:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+
 def _parse_date(date_str: str) -> datetime | None:
     """Parse a LongMemEval date string like '2023/05/30 (Tue) 23:40'."""
     if not date_str:
@@ -680,6 +714,7 @@ def _parse_date(date_str: str) -> datetime | None:
 
 
 # ── CLI entry point ───────────────────────────────────────────────────────────
+
 
 async def main() -> None:
     import argparse

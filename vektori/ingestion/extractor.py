@@ -32,7 +32,6 @@ Prioritise extracting:
 - Specific product features or capabilities the prospect expressed interest in
 - ICP qualification signals (company size, industry, tech stack)
 Deprioritise: general greetings, scheduling logistics unrelated to deal timeline, small talk.""",
-
     "sales": """
 Domain focus (sales agent):
 Prioritise extracting:
@@ -45,7 +44,6 @@ Prioritise extracting:
 - Legal, procurement, or security review concerns raised
 - Champion and economic buyer identification
 Deprioritise: general greetings, small talk.""",
-
     "account_management": """
 Domain focus (account management agent):
 Prioritise extracting:
@@ -57,7 +55,6 @@ Prioritise extracting:
 - Feature requests and product feedback from the customer
 - Commitments made by the account team
 Deprioritise: general pleasantries, unrelated small talk.""",
-
     # ── Customer experience ───────────────────────────────────────────────────
     "support": """
 Domain focus (customer support agent):
@@ -70,7 +67,6 @@ Prioritise extracting:
 - Escalation triggers or SLA/ticket references
 - Follow-up commitments and deadlines
 Deprioritise: scripted greetings, hold messages, boilerplate closing pleasantries.""",
-
     "onboarding": """
 Domain focus (customer onboarding agent):
 Prioritise extracting:
@@ -82,7 +78,6 @@ Prioritise extracting:
 - Go-live dates and success criteria defined
 - Configuration choices and setup decisions made
 Deprioritise: generic greetings, off-topic conversation.""",
-
     # ── People & talent ───────────────────────────────────────────────────────
     "hr": """
 Domain focus (HR agent):
@@ -95,7 +90,6 @@ Prioritise extracting:
 - Leave, absence, or schedule-related details
 - Compensation or benefits questions raised
 Deprioritise: casual small talk, water-cooler conversation, off-topic personal chat.""",
-
     "recruiting": """
 Domain focus (recruiting / talent acquisition agent):
 Prioritise extracting:
@@ -107,7 +101,6 @@ Prioritise extracting:
 - Red flags or concerns noted by the recruiter
 - Next steps and scheduled interviews
 Deprioritise: small talk, generic introductions.""",
-
     # ── Finance & legal ───────────────────────────────────────────────────────
     "finance": """
 Domain focus (finance / accounting agent):
@@ -120,7 +113,6 @@ Prioritise extracting:
 - Vendor names and contract financial terms
 - Reporting deadlines and period-close milestones
 Deprioritise: general chat, non-financial pleasantries.""",
-
     "legal": """
 Domain focus (legal agent):
 Prioritise extracting:
@@ -132,7 +124,6 @@ Prioritise extracting:
 - Dispute details, allegations, or litigation references
 - Legal advice or guidance provided
 Deprioritise: casual conversation, non-legal pleasantries.""",
-
     # ── Technical ────────────────────────────────────────────────────────────
     "coding": """
 Domain focus (software engineering / coding agent):
@@ -145,7 +136,6 @@ Prioritise extracting:
 - Performance or security concerns raised
 - Task assignments, PR numbers, and deadlines
 Deprioritise: generic greetings, non-technical small talk.""",
-
     "data_analytics": """
 Domain focus (data / analytics agent):
 Prioritise extracting:
@@ -157,7 +147,6 @@ Prioritise extracting:
 - Data pipeline or ETL issues mentioned
 - Deadlines for reports or model deliverables
 Deprioritise: general pleasantries, off-topic conversation.""",
-
     "research": """
 Domain focus (research agent):
 Prioritise extracting:
@@ -169,7 +158,6 @@ Prioritise extracting:
 - Next research steps and open questions
 - Authors, institutions, or publications mentioned
 Deprioritise: administrative filler, generic acknowledgements.""",
-
     "cybersecurity": """
 Domain focus (cybersecurity agent):
 Prioritise extracting:
@@ -181,7 +169,6 @@ Prioritise extracting:
 - Compliance frameworks referenced (ISO 27001, NIST, SOC 2)
 - Incident timeline and containment actions
 Deprioritise: routine greetings, non-security small talk.""",
-
     # ── Operations & industry ────────────────────────────────────────────────
     "healthcare": """
 Domain focus (healthcare / clinical agent):
@@ -195,7 +182,6 @@ Prioritise extracting:
 - Follow-up instructions and care commitments
 Deprioritise: general small talk, non-clinical pleasantries.
 Note: treat all health information with appropriate sensitivity.""",
-
     "supply_chain": """
 Domain focus (supply chain / logistics agent):
 Prioritise extracting:
@@ -207,7 +193,6 @@ Prioritise extracting:
 - Disruption signals (port delays, weather, supplier issues)
 - Cost-per-unit or freight cost changes mentioned
 Deprioritise: general pleasantries, unrelated conversation.""",
-
     "retail": """
 Domain focus (retail / e-commerce agent):
 Prioritise extracting:
@@ -219,7 +204,6 @@ Prioritise extracting:
 - Loyalty programme status and points
 - Competitor products or pricing mentioned
 Deprioritise: generic greetings, unrelated small talk.""",
-
     "operations": """
 Domain focus (operations / scheduling agent):
 Prioritise extracting:
@@ -349,6 +333,7 @@ General:
 - subject: 'user' when about the person speaking; a named entity when about someone/something they mention; 'assistant' for assistant facts
 - Extract at most {max_facts} facts total — prioritize high-confidence, significant ones
 - If nothing factual was stated, return {{"facts": []}}
+- Always name the person explicitly in every fact. Never write "the user" — use the actual name (e.g. "Caroline likes hiking", not "the user likes hiking").
 - Dates in `text`: if CONVERSATION DATE is provided, replace relative time references with the actual date.
   "today" → "on YYYY-MM-DD", "yesterday" → "on YYYY-MM-DD", "last week" → "on week of YYYY-MM-DD", etc.
   Do NOT use relative expressions if you know the absolute date.
@@ -433,7 +418,7 @@ class FactExtractor:
         max_facts: int = 8,
         max_input_tokens: int = 4000,
         max_output_tokens: int = 8192,
-        extraction_config: "ExtractionConfig | None" = None,
+        extraction_config: ExtractionConfig | None = None,
     ) -> None:
         self.db = db
         self.embedder = embedder
@@ -534,6 +519,7 @@ class FactExtractor:
         sentence_ids: list[str] | None = None,
         session_time: datetime | None = None,
         _capture_out: list[dict[str, Any]] | None = None,
+        _capture_episodes_out: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """
         One LLM call: extract facts, run dedup in code, link to sentences.
@@ -576,6 +562,7 @@ class FactExtractor:
                     user_id,
                     agent_id,
                     session_time=session_time,
+                    _capture_out=_capture_episodes_out,
                 )
             except Exception as e:
                 logger.warning("Episode extraction failed for session %s: %s", session_id, e)
@@ -701,7 +688,7 @@ class FactExtractor:
 
                 # Write-time semantic dedup
                 dedup = await self._check_dedup(
-                    fact_embedding, session_id, user_id, agent_id, subject
+                    fact_data["text"], fact_embedding, session_id, user_id, agent_id, subject
                 )
 
                 if dedup is not None:
@@ -761,6 +748,9 @@ class FactExtractor:
                     for sent_id in linked:
                         await self.db.insert_fact_source(fact_id, sent_id)
 
+                # Build similarity edges for PPR graph
+                await self._build_fact_edges(fact_id, fact_embedding, user_id, agent_id)
+
             except Exception as e:
                 logger.warning("Failed to insert fact '%s': %s", fact_data.get("text"), e)
 
@@ -803,7 +793,9 @@ class FactExtractor:
 
                 # Dedup check — in a fresh user context this always returns None,
                 # but we run it anyway for correctness if sessions overlap.
-                dedup = await self._check_dedup(fact_emb, session_id, user_id, agent_id, subject)
+                dedup = await self._check_dedup(
+                    fact_data["text"], fact_emb, session_id, user_id, agent_id, subject
+                )
                 if dedup is not None:
                     existing_id, same_session = dedup
                     await self.db.increment_fact_mentions(existing_id)
@@ -841,6 +833,9 @@ class FactExtractor:
                     for sent_id in linked:
                         await self.db.insert_fact_source(fact_id, sent_id)
 
+                # Mirror fresh-path: build PPR similarity edges for this fact
+                await self._build_fact_edges(fact_id, fact_emb, user_id, agent_id)
+
             except Exception as e:
                 logger.warning("Failed to replay fact '%s': %s", fact_data.get("text"), e)
 
@@ -850,6 +845,7 @@ class FactExtractor:
 
     async def _check_dedup(
         self,
+        fact_text: str,
         fact_embedding: list[float],
         session_id: str,
         user_id: str,
@@ -885,9 +881,121 @@ class FactExtractor:
                 return (best["id"], True)
             if not same_session and sim > 0.85:
                 return (best["id"], False)
+
+            # Contradiction LLM check for near-misses
+            # If the fact wasn't deduped by bare similarity, check if it contradicts.
+            # Only consider same-subject facts that are reasonably close (sim > 0.65).
+            plausible_conflicts = [c for c in candidates if (1.0 - c.get("distance", 1.0)) > 0.65]
+            if plausible_conflicts:
+                facts_text = "\n".join(f"- [{c['id']}] {c['text']}" for c in plausible_conflicts)
+                prompt = CONTRADICTION_PROMPT.format(fact_text=fact_text, existing_facts=facts_text)
+                try:
+                    response = await self.llm.generate(prompt, max_tokens=512)
+                    data = _parse_json_response(response)
+                    supersedes_id = data.get("supersedes_id")
+                    if supersedes_id and any(c["id"] == supersedes_id for c in plausible_conflicts):
+                        return (supersedes_id, False)
+                except Exception as e:
+                    logger.debug("Contradiction check failed: %s", e)
+
         except Exception as e:
             logger.warning("Dedup lookup failed: %s", e)
         return None
+
+    async def _build_fact_edges(
+        self,
+        fact_id: str,
+        fact_embedding: list[float],
+        user_id: str,
+        agent_id: str | None,
+        sim_threshold: float = 0.75,
+        limit: int = 10,
+    ) -> None:
+        """Find similar existing facts and insert PPR graph edges.
+
+        Lower threshold than dedup (0.75 vs 0.85) so we capture "related but
+        not duplicate" facts — the edges that let PPR multi-hop from matched
+        facts to relevant-but-unmatched ones.
+        """
+        try:
+            candidates = await self.db.search_facts(
+                embedding=fact_embedding,
+                user_id=user_id,
+                agent_id=agent_id,
+                limit=limit,
+                active_only=True,
+            )
+            for c in candidates:
+                if c["id"] == fact_id:
+                    continue
+                sim = 1.0 - c.get("distance", 1.0)
+                if sim >= sim_threshold:
+                    await self.db.insert_fact_edge(fact_id, c["id"], user_id, weight=round(sim, 4))
+        except Exception as e:
+            logger.debug("_build_fact_edges failed for %s: %s", fact_id, e)
+
+    async def replay_episodes(
+        self,
+        cached_episodes: list[dict[str, Any]],
+        inserted_facts: list[tuple[str, str]],
+        session_id: str,
+        user_id: str,
+        agent_id: str | None = None,
+        session_time: datetime | None = None,
+    ) -> int:
+        """Insert pre-extracted episodes from cache. No LLM call.
+
+        cached_episodes: raw episode dicts from cache: [{"text": ..., "fact_indices": [...]}]
+        inserted_facts:  (fact_id, text) pairs from replay_facts() for this session,
+                         used to map fact_indices → fresh DB fact IDs.
+        """
+        if not cached_episodes or not inserted_facts:
+            return 0
+
+        fact_id_list = [fid for fid, _ in inserted_facts]
+        episode_texts = [(ep.get("text") or "").strip() for ep in cached_episodes]
+        episode_texts = [t for t in episode_texts if t]
+        if not episode_texts:
+            return 0
+
+        try:
+            embeddings = await self.embedder.embed_batch(episode_texts)
+        except Exception as e:
+            logger.warning("Batch embed failed during episode replay: %s", e)
+            return 0
+
+        episodes_created = 0
+        text_iter = iter(zip(episode_texts, embeddings))
+        for ep_data in cached_episodes:
+            text = (ep_data.get("text") or "").strip()
+            if not text:
+                continue
+            indices = ep_data.get("fact_indices") or []
+            try:
+                _, embedding = next(text_iter)
+            except StopIteration:
+                break
+
+            linked_ids = [
+                fact_id_list[i]
+                for i in indices
+                if isinstance(i, int) and 0 <= i < len(fact_id_list)
+            ]
+            if not linked_ids:
+                continue
+
+            try:
+                episode_id = await self.db.insert_episode(
+                    text, embedding, user_id, agent_id, session_id,
+                    event_time=session_time,
+                )
+                for fid in linked_ids:
+                    await self.db.insert_episode_fact(episode_id, fid)
+                episodes_created += 1
+            except Exception as e:
+                logger.warning("Failed to replay episode '%s': %s", text, e)
+
+        return episodes_created
 
     async def _extract_episodes(
         self,
@@ -898,6 +1006,7 @@ class FactExtractor:
         agent_id: str | None,
         max_episodes: int = 5,
         session_time: datetime | None = None,
+        _capture_out: list[dict[str, Any]] | None = None,
     ) -> int:
         """Extract episodic memory narratives from the conversation and its facts.
 
@@ -951,6 +1060,9 @@ class FactExtractor:
         if not raw_episodes:
             return 0
 
+        if _capture_out is not None:
+            _capture_out.extend(raw_episodes)
+
         # Batch embed all episode texts in one call
         episode_texts = [(ep.get("text") or "").strip() for ep in raw_episodes]
         episode_texts = [t for t in episode_texts if t]
@@ -987,7 +1099,8 @@ class FactExtractor:
 
             try:
                 episode_id = await self.db.insert_episode(
-                    text, embedding, user_id, agent_id, session_id
+                    text, embedding, user_id, agent_id, session_id,
+                    event_time=session_time,
                 )
                 for fid in linked_ids:
                     await self.db.insert_episode_fact(episode_id, fid)
@@ -1046,15 +1159,60 @@ class FactExtractor:
 
 
 def _parse_json_response(response: str) -> dict[str, Any]:
-    """Parse LLM JSON response, stripping markdown code fences if present."""
+    """Parse LLM JSON response, stripping markdown code fences if present.
+
+    Handles three common model output patterns:
+    1. Raw JSON
+    2. ```json ... ``` fenced block at the start
+    3. Prose followed by a fenced or bare JSON block anywhere in the response
+    """
+    import re
+
     text = response.strip()
+
+    # Pattern 1: starts with a fence — strip it
     if text.startswith("```"):
         lines = text.split("\n")
         start = 1
         end = len(lines) - 1 if lines[-1].strip() == "```" else len(lines)
-        text = "\n".join(lines[start:end])
+        text = "\n".join(lines[start:end]).strip()
+
+    # Try direct parse first (handles pattern 1 and raw JSON)
     try:
         return json.loads(text)
-    except json.JSONDecodeError as e:
-        logger.error("Failed to parse extraction JSON: %s\nResponse: %.500s", e, response)
-        return {"facts": []}
+    except json.JSONDecodeError:
+        pass
+
+    # Pattern 3: prose with an embedded fenced block — extract the last JSON object/array
+    # Try fenced blocks first (```...```)
+    fenced = re.findall(r"```(?:json)?\s*([\s\S]*?)```", response)
+    for block in reversed(fenced):
+        try:
+            return json.loads(block.strip())
+        except json.JSONDecodeError:
+            continue
+
+    # Last resort: find the last {...} or [...] in the response
+    for match in reversed(list(re.finditer(r"(\{[\s\S]*\}|\[[\s\S]*\])", response))):
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            continue
+
+    logger.error("Failed to parse extraction JSON: %s\nResponse: %.500s", "no valid JSON found", response)
+    return {"facts": []}
+
+
+# ── Contradiction prompt ──────────────────────────────────────────────────────
+CONTRADICTION_PROMPT = """Do any of the existing facts contradict or get superseded by the new fact?
+New fact: "{fact_text}"
+
+Existing facts:
+{existing_facts}
+
+If the new fact updates, contradicts, or replaces an existing fact, return its ID. Otherwise return null.
+
+Return ONLY JSON:
+{{
+  "supersedes_id": "fact_id_here" or null
+}}"""

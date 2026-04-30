@@ -1,21 +1,39 @@
-<p align="center">
-  <img src="assets/logo/memory-stack-logo-transparent.svg" width="96" height="96" alt="Vektori logo" />
-</p>
+<div align="center">
 
-<h1 align="center">Vektori</h1>
+<img src="assets/logo/memory-stack-logo-transparent.svg" width="96" height="96" alt="Vektori logo" />
 
-<p align="center"><strong>Memory that remembers the story, not just the facts.</strong></p>
+<h1>Vektori</h1>
 
-<p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License: Apache 2.0" /></a>
-  <a href="https://pypi.org/project/vektori/"><img src="https://img.shields.io/pypi/v/vektori" alt="PyPI" /></a>
-  <a href="https://pypi.org/project/vektori/"><img src="https://img.shields.io/pypi/dm/vektori?color=blue" alt="PyPI Downloads" /></a>
-  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10+-blue.svg" alt="Python 3.10+" /></a>
-</p>
+<p><strong>Memory that remembers the story, not just the facts.</strong></p>
+
+<a href="https://github.com/vektori-ai/vektori">GitHub</a> · <a href="https://github.com/vektori-ai/vektori/issues">Issues</a> · <a href="./docs">Docs</a>
+
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![PyPI](https://img.shields.io/pypi/v/vektori)](https://pypi.org/project/vektori/)
+[![Downloads](https://img.shields.io/pypi/dm/vektori?color=blue)](https://pypi.org/project/vektori/)
+[![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Stars](https://img.shields.io/github/stars/vektori-ai/vektori?style=flat&color=ffcb47&labelColor=black)](https://github.com/vektori-ai/vektori)
+[![Issues](https://img.shields.io/github/issues/vektori-ai/vektori?labelColor=black&style=flat&color=ff80eb)](https://github.com/vektori-ai/vektori/issues)
+[![Contributors](https://img.shields.io/github/contributors/vektori-ai/vektori?color=c4f042&labelColor=black&style=flat)](https://github.com/vektori-ai/vektori/graphs/contributors)
+[![Last Commit](https://img.shields.io/github/last-commit/vektori-ai/vektori?color=c4f042&labelColor=black)](https://github.com/vektori-ai/vektori/commits/main)
+
+👋 Questions, ideas, bugs → [GitHub Issues](https://github.com/vektori-ai/vektori/issues) · [Discussions](https://github.com/vektori-ai/vektori/discussions)
+
+If Vektori has been useful, a ⭐ goes a long way.
+
+</div>
 
 ---
 
-Most memory systems compress conversations into entity-relationship triples. You get the answer, but you lose the texture, the reasoning, the trajectory. Vektori uses a **three-layer sentence graph** so agents don't just recall preferences, they understand how things got there.
+## Why Vektori
+
+Building agents that actually remember people is harder than it looks:
+
+- **Facts aren't enough.** Knowing a user prefers WhatsApp is different from knowing they've asked three times and are getting frustrated. Most systems give you the what, not the why or how it changed.
+- **Patterns stay invisible.** Spotting that someone's tone has been shifting across sessions requires more than point-in-time retrieval — you need to see the trajectory.
+- **Context overhead explodes.** Stuffing raw conversation history into every prompt doesn't scale. You need structure, not just storage.
+
+Vektori solves this with a **three-layer sentence graph**. Agents don't just recall preferences — they understand how things got there.
 
 ```
 FACT LAYER (L0)      <- vector search surface. Short, crisp statements.
@@ -35,11 +53,20 @@ Search hits Facts, graph discovers Episodes, traces back to source Sentences. SQ
 
 ## Benchmarks
 
-| Benchmark | Score | Depth | Models |
-|-----------|-------|-------|--------|
-| LongMemEval-S | **73%** | L1 | BGE-M3 + Gemini Flash |
+Tested on long-horizon memory benchmarks — hundreds of turns, real user details buried deep in history.
 
-Still improving. Run your own in [`/benchmarks`](benchmarks/).
+| Benchmark | Vektori | Mem0 | Zep | Supermemory | Letta |
+|-----------|---------|------|-----|-------------|-------|
+| LoCoMo | **66%** | 66% | 58%† | ~70% | ~83% |
+| LongMemEval-S | **73%** | — | 64% | 85% | — |
+
+†Zep's self-reported score is 75%; independently re-evaluated at 58%. Scores across systems are not always directly comparable — model choice (GPT-4o vs GPT-4.1-mini vs local) significantly affects results. 
+
+We used gemini-2.5-flash-lite because of token cost, better models imporve accuracy a lot. Benchmarks at L1 level
+
+On LoCoMo and longmemEval, **the retrieved context contains the answer in 95% of questions** — the gap to 66% is a synthesis problem, not a retrieval one. Actively working on closing it, exploring RL.
+
+Still improving — PRs and evals welcome. Run your own: [`/benchmarks`](benchmarks/)
 
 ---
 
@@ -111,8 +138,8 @@ Pick how deep you want to go.
 | Depth | Returns | ~Tokens | When to use |
 |-------|---------|---------|-------------|
 | `l0`  | Facts only | 50-200 | Fast lookup, agent planning, tool calls |
-| `l1`  | Facts + Episodes | 200-500 | **Default.** Full answer with context |
-| `l2`  | Facts + Episodes + raw Sentences | 1000-3000 | Trajectory analysis, full story replay |
+| `l1`  | Facts + Episodes + source Sentences | 300-800 | **Default.** Full answer with context |
+| `l2`  | Facts + Episodes + Sentences + ±N context window | 1000-3000 | Trajectory analysis, full story replay |
 
 ```python
 # Just the facts
@@ -129,45 +156,60 @@ results = await v.search(query, user_id, depth="l2", context_window=3)
 
 ## Build an Agent with Memory
 
-The low-level way is still available, but the new native harness is the right default.
+Three lines to wire memory into any agent loop:
 
 ```python
 import asyncio
-from vektori import AgentConfig, Vektori, VektoriAgent
-from vektori.models.factory import create_chat_model
+from openai import AsyncOpenAI
+from vektori import Vektori
+
+client = AsyncOpenAI()
 
 async def chat(user_id: str):
-    memory = Vektori(
+    v = Vektori(
         embedding_model="openai:text-embedding-3-small",
         extraction_model="openai:gpt-4o-mini",
     )
-    agent = VektoriAgent(
-        memory=memory,
-        model=create_chat_model("openai:gpt-4o-mini"),
-        user_id=user_id,
-        agent_id="demo-agent",
-        session_id=f"session-{user_id}-001",
-        config=AgentConfig(background_add=True),
-    )
+    session_id = f"session-{user_id}-001"
+    history = []
 
     print("Chat with memory (type 'quit' to exit)\n")
     while True:
         user_input = input("You: ").strip()
         if user_input.lower() == "quit":
             break
-        result = await agent.chat(user_input)
-        print(f"Assistant: {result.content}\n")
 
-    await agent.close()
-    await memory.close()
+        # 1. Pull relevant memory
+        mem = await v.search(query=user_input, user_id=user_id, depth="l1")
+        facts = "\n".join(f"- {f['text']}" for f in mem.get("facts", []))
+        episodes = "\n".join(f"- {ep['text']}" for ep in mem.get("episodes", []))
+
+        # 2. Inject into system prompt
+        system = "You are a helpful assistant with memory.\n"
+        if facts:    system += f"\nKnown facts:\n{facts}"
+        if episodes: system += f"\nBehavioral episodes:\n{episodes}"
+
+        # 3. Get response
+        history.append({"role": "user", "content": user_input})
+        resp = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "system", "content": system}, *history],
+        )
+        reply = resp.choices[0].message.content
+        history.append({"role": "assistant", "content": reply})
+        print(f"Assistant: {reply}\n")
+
+        # 4. Store exchange
+        await v.add(
+            messages=[{"role": "user", "content": user_input},
+                      {"role": "assistant", "content": reply}],
+            session_id=session_id,
+            user_id=user_id,
+        )
+
+    await v.close()
 
 asyncio.run(chat("demo-user"))
-```
-
-You can also run the harness from the CLI:
-
-```bash
-vektori agent chat --user-id demo-user --agent-id support-agent
 ```
 
 More examples in [`/examples`](examples/):
@@ -315,26 +357,30 @@ v = Vektori(embedding_model="bge:BAAI/bge-m3")
 v = Vektori(extraction_model="litellm:groq/llama3-8b-8192")
 ```
 
----
+## NVIDIA NIM - GPU-optimized models via [NVIDIA NIM](https://build.nvidia.com).
+```python
+# NVIDIA embedding models (Matryoshka: 384-2048 dimensions)
+v = Vektori(
+    embedding_model="nvidia:llama-nemotron-embed-1b-v2",
+    embedding_dimension=1024,  # Optional: 384, 512, 768, 1024, or 2048
+)
 
-## Why Not Mem0 / Zep?
+# NVIDIA LLM models (nvidia/ prefix auto-added)
+v = Vektori(extraction_model="nvidia:llama-3.3-nemotron-super-49b-v1")
 
-| | Mem0 / Zep | **Vektori** |
-|---|---|---|
-| Memory model | Entity-relation triples | Three-layer sentence graph |
-| What you get | The answer | The answer + reasoning + story |
-| Patterns beyond facts | Manual graph queries | Auto-discovered (Episode layer) |
-| Default backend | Requires external DB | SQLite, zero config |
-| Fully local / offline | No | Yes (Ollama, BGE-M3, SentenceTransformers) |
-| License | Partial OSS | Apache 2.0 |
+# Third-party models hosted on NVIDIA NIM (use full path)
+v = Vektori(extraction_model="nvidia:z-ai/glm5")
 
-Mem0 and Zep are solid tools. But they compress conversations into triples, so you get the *what* but not the *why* or how it changed over time. That matters when you're building agents that need to reason about a person's trajectory, not just their current state.
-
+```
 ---
 
 ## Contributing
 
-Issues, PRs, and ideas welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
+Vektori is early and there's a lot of ground to cover. If you're building agents that need memory, your real-world feedback is the most valuable thing you can contribute.
+
+- Found a bug or an edge case? [Open an issue](https://github.com/vektori-ai/vektori/issues)
+- Have an idea or want to discuss direction? [Start a discussion](https://github.com/vektori-ai/vektori/discussions)
+- Want to contribute code? See [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ```bash
 git clone https://github.com/vektori-ai/vektori
@@ -342,6 +388,12 @@ cd vektori
 pip install -e ".[dev]"
 pytest tests/unit/
 ```
+
+---
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=vektori-ai/vektori&type=timeline)](https://www.star-history.com/#vektori-ai/vektori&type=timeline)
 
 ---
 

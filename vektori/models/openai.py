@@ -1,15 +1,10 @@
-"""OpenAI embedding, extraction, and chat providers."""
+"""OpenAI embedding and LLM providers."""
 
 from __future__ import annotations
 
 import logging
 
-from vektori.models.base import (
-    ChatCompletionResult,
-    ChatModelProvider,
-    EmbeddingProvider,
-    LLMProvider,
-)
+from vektori.models.base import ChatCompletionResult, ChatModelProvider, EmbeddingProvider, LLMProvider
 
 logger = logging.getLogger(__name__)
 

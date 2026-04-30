@@ -130,6 +130,42 @@ CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions (user_id);
 
 
 -- ============================================================
+-- ============================================================
+-- SYNTHESES: The middle layer (L1). LLM-generated episodic memory narratives.
+-- Discovered via graph traversal from matched facts, also directly vector-searched.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS syntheses (
+    id UUID PRIMARY KEY,
+    text TEXT NOT NULL,
+    embedding vector(1536),               -- for direct vector search at retrieval
+    user_id TEXT NOT NULL,
+    agent_id TEXT,
+    session_id TEXT,                       -- session this synthesis came from
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_syntheses_user ON syntheses (user_id);
+CREATE INDEX IF NOT EXISTS idx_syntheses_embedding ON syntheses
+    USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+-- Dedup: same synthesis text for same user and agent scope is idempotent
+CREATE UNIQUE INDEX IF NOT EXISTS idx_syntheses_user_agent_text
+    ON syntheses (user_id, COALESCE(agent_id, ''), text);
+
+
+-- ============================================================
+-- EPISODE_FACTS: Links syntheses (L1) to the facts (L0) they were derived from.
+-- Graph edge: traversed after L0 vector search to surface syntheses.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS synthesis_facts (
+    synthesis_id UUID NOT NULL REFERENCES syntheses(id) ON DELETE CASCADE,
+    fact_id UUID NOT NULL REFERENCES facts(id) ON DELETE CASCADE,
+    PRIMARY KEY (synthesis_id, fact_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_synthesis_facts_synthesis ON synthesis_facts (synthesis_id);
+CREATE INDEX IF NOT EXISTS idx_synthesis_facts_fact ON synthesis_facts (fact_id);
+
 -- EPISODES: The middle layer (L1). LLM-generated episodic memory narratives.
 -- Discovered via graph traversal from matched facts, also directly vector-searched.
 -- ============================================================
@@ -163,3 +199,20 @@ CREATE TABLE IF NOT EXISTS episode_facts (
 
 CREATE INDEX IF NOT EXISTS idx_episode_facts_episode ON episode_facts (episode_id);
 CREATE INDEX IF NOT EXISTS idx_episode_facts_fact ON episode_facts (fact_id);
+
+
+-- ============================================================
+-- FACT_EDGES: Similarity edges between facts for PPR graph traversal.
+-- Built at write time when a new fact has cosine sim > 0.75 with existing facts.
+-- Enables multi-hop retrieval: query → matched facts → related facts → episodes.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS fact_edges (
+    source_id UUID NOT NULL REFERENCES facts(id) ON DELETE CASCADE,
+    target_id UUID NOT NULL REFERENCES facts(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL,
+    weight FLOAT DEFAULT 1.0,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (source_id, target_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fact_edges_user ON fact_edges (user_id);
